@@ -10,7 +10,9 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.os.SystemClock;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 
 import org.ppsspp.ppsspp.duo.DuoMod;
@@ -44,20 +46,11 @@ public final class Persona1Mod extends DuoMod {
     private static final int NAME = 0x40;
     private static final int NAME_LEN = 0x24;
     private static final int LEVEL = 0x6A;
-    private static final int FACING = 0x08CCD8CC;
-    private static final int DUNGEON_PTR = 0x08CCBD5C;
-    private static final int DUNGEON_SIZE = 0x50;
-    private static final int BLOCK_TABLE = 0x08A92AD4;
-    private static final int BLOCK_TABLE_SIZE = 0x40;
-    private static final int EXPLORED = 0x08CC689C;
-    private static final int MAP_SIZE = 24;
-    private static final int MAP_BLOCK = MAP_SIZE * 3;
-    private static final int MAP_BLOCK_COUNT = 0xA8;
+    private static final long HIT_EFFECT_MS = 450;
 
     private DuoModContext host;
     private Persona1View view;
     private long lastBattle;
-    private int dungeon;
 
     @Override public String getId() { return ID; }
 
@@ -78,7 +71,6 @@ public final class Persona1Mod extends DuoMod {
     @Override public View onCreateView(DuoModContext host) {
         this.host = host;
         view = new Persona1View(host.getContext());
-        dungeon = 0;
         watch();
         Persona1Art.loadFaces(host, () -> {
             if (view != null) view.invalidate();
@@ -97,8 +89,6 @@ public final class Persona1Mod extends DuoMod {
         byte[] party = host.readMemoryWatch(1);
         byte[] units = host.readMemoryWatch(2);
         if (flag == null || party == null || units == null) return;
-        MapState map = readMap();
-        view.setMap(map);
 
         Unit[] enemies = null;
         if (u32(flag, 0) != FIELD) {
@@ -115,61 +105,18 @@ public final class Persona1Mod extends DuoMod {
                 if (view != null) view.invalidate();
             });
         } else if (android.os.SystemClock.uptimeMillis() - lastBattle > 1500) {
-            // PARTY points at the saved character roster, which can still contain
-            // characters who have left the active party. The first PARTY_COUNT
-            // entries in UNITS reflect the live party slots, matching the roster
-            // used above during battle. Use those slots on the field too so former
-            // members do not remain on the companion screen.
-            view.setUnits(readUnits(units, 0, PARTY_COUNT, UNIT_SIZE, false), null, false);
+            // The saved party roster is current on the field; battle slots can lag after a
+            // character joins or leaves. During battle, use the live battle slots above.
+            view.setUnits(readUnits(party, 0, PARTY_COUNT, PARTY_SIZE, false), null, false);
         }
     }
 
     private void watch() {
         host.setMemoryWatches(
-            new int[] {FLAG, PARTY, UNITS, FACING, EXPLORED, DUNGEON_PTR, BLOCK_TABLE, dungeon != 0 ? dungeon : DUNGEON_PTR},
-            new int[] {4, PARTY_SIZE * PARTY_COUNT, UNIT_SIZE * (PARTY_COUNT + ENEMY_COUNT), 4,
-                MAP_BLOCK * MAP_BLOCK_COUNT, 4, BLOCK_TABLE_SIZE, DUNGEON_SIZE}
+            new int[] {FLAG, PARTY, UNITS},
+            new int[] {4, PARTY_SIZE * PARTY_COUNT, UNIT_SIZE * (PARTY_COUNT + ENEMY_COUNT)}
         );
     }
-
-    private static final class MapState {
-        final byte[] cells = new byte[MAP_BLOCK];
-        int x, y;
-        float angle;
-        int[] walls, doors;
-        boolean explored(int c, int r) {
-            if (c < 0 || r < 0 || c >= MAP_SIZE || r >= MAP_SIZE) return false;
-            return (c == x && r == y) || (cells[r * 3 + c / 8] & (0x80 >> (c % 8))) != 0;
-        }
-    }
-
-    private MapState readMap() {
-        byte[] facing = host.readMemoryWatch(3), explored = host.readMemoryWatch(4), ptr = host.readMemoryWatch(5);
-        byte[] table = host.readMemoryWatch(6), d = host.readMemoryWatch(7);
-        if (ptr == null) return null;
-        int p = u32(ptr, 0);
-        if (p != dungeon) {
-            dungeon = p >= 0x08800000 && p < 0x0A000000 - DUNGEON_SIZE ? p : 0;
-            watch();
-            return null;
-        }
-        if (dungeon == 0 || facing == null || explored == null || table == null || d == null) return null;
-        int id = u16(d, 0x46), floor = u16(d, 0x48);
-        if (id >= BLOCK_TABLE_SIZE || floor > 15) return null;
-        int block = (table[id] & 0xFF) + floor;
-        MapState m = new MapState();
-        m.angle = Float.intBitsToFloat(u32(facing, 0));
-        m.x = d[0x2A] & 0xFF;
-        m.y = d[0x2C] & 0xFF;
-        if (block >= MAP_BLOCK_COUNT || m.x >= MAP_SIZE || m.y >= MAP_SIZE || Float.isNaN(m.angle)) return null;
-        System.arraycopy(explored, block * MAP_BLOCK, m.cells, 0, MAP_BLOCK);
-        Persona1Art.Dungeon dg = Persona1Art.dungeon(id);
-        if (dg == null) Persona1Art.loadDungeon(host, id, () -> { if (view != null) view.invalidate(); });
-        else if (floor < dg.walls.length) { m.walls = dg.walls[floor]; m.doors = dg.doors[floor]; }
-        return m;
-    }
-
-    private static int u16(byte[] b, int o) { return (b[o] & 0xFF) | ((b[o + 1] & 0xFF) << 8); }
 
     private static final class Unit {
         String name;
@@ -235,25 +182,23 @@ public final class Persona1Mod extends DuoMod {
     }
 
     private static final class Persona1View extends View {
-        private static final int BG = 0xFF292D2E;
-        private static final int PANEL = 0xFF85898A;
-        private static final int PANEL_LIGHT = 0xFFA5A7A5;
-        private static final int PANEL_DARK = 0xFF292D2E;
+        private static final int BG = 0xFF17121D;
+        private static final int PANEL = 0xFF6E4A86;
+        private static final int PANEL_LIGHT = 0xFF8E55B8;
+        private static final int PANEL_DARK = 0xFF251333;
         private static final int WHITE = 0xFFF3F1EA;
-        private static final int BLACK = 0xFF151719;
+        private static final int BLACK = 0xFF100B16;
         private static final int GREEN = 0xFF9CFF20;
         private static final int HP_COLOR = 0xFFB7D83D;
         private static final int SP_COLOR = 0xFF50D2E7;
-        private static final int DIM_OVERLAY = 0x77565A5B;
+        private static final int DIM_OVERLAY = 0x775A5064;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint grayPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final RectF rect = new RectF();
-        private final Path mapPath = new Path();
-        private MapState map;
-        private boolean showMap;
         private final Typeface font;
         private final Typeface boldFont;
         private Unit[] party = new Unit[0];
+        private final long[] hitTimes = new long[PARTY_COUNT];
         private Unit[] enemies;
         private boolean battle;
         private int selected = 0;
@@ -261,15 +206,22 @@ public final class Persona1Mod extends DuoMod {
         private boolean showFullPortrait;
         private final Map<String, Bitmap> highResPortraits = new HashMap<>();
         private Unit fullPortraitUnit;
+        private final ScaleGestureDetector scaleDetector;
+        private float portraitZoom = 1f;
+        private float portraitOffsetX, portraitOffsetY;
+        private float portraitLastX, portraitLastY;
+        private int portraitPointerId = MotionEvent.INVALID_POINTER_ID;
+        private boolean portraitGestureUsed;
         private float scrollX;
         private float downX, downY, lastX;
+        private float viewScale = 1f;
         private boolean dragging;
         private boolean moved;
         private static final float MARGIN = 5f;
         private static final float GAP = 4f;
         private static final float CARD_W = 58f;
         private static final float CARD_TOP = 5f;
-        private static final float CARD_H = 154f;
+        private static final float CARD_H = 168f;
         private static final float PANEL_TOP = 177f;
         private static final float PANEL_BOTTOM = 235f;
 
@@ -283,6 +235,35 @@ public final class Persona1Mod extends DuoMod {
             }
             font = loaded;
             boldFont = Typeface.create(loaded, Typeface.BOLD);
+            scaleDetector = new ScaleGestureDetector(context,
+                new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                    @Override public boolean onScale(ScaleGestureDetector detector) {
+                        float oldZoom = portraitZoom;
+                        float newZoom = Math.max(1f, Math.min(5f,
+                            oldZoom * (float)Math.pow(detector.getScaleFactor(), 0.90)));
+                        if (Math.abs(newZoom - oldZoom) < 0.0005f) return true;
+                        float focusX = detector.getFocusX() / viewScale;
+                        float focusY = detector.getFocusY() / viewScale;
+                        float centerX = getWidth() / viewScale / 2f;
+                        float centerY = 120f;
+                        float ratio = newZoom / oldZoom;
+                        portraitOffsetX = focusX - centerX -
+                            (focusX - centerX - portraitOffsetX) * ratio;
+                        portraitOffsetY = focusY - centerY -
+                            (focusY - centerY - portraitOffsetY) * ratio;
+                        portraitZoom = newZoom;
+                        if (portraitZoom <= 1.001f) {
+                            portraitZoom = 1f;
+                            portraitOffsetX = portraitOffsetY = 0f;
+                        } else {
+                            clampPortraitOffsets();
+                        }
+                        portraitGestureUsed = true;
+                        moved = true;
+                        invalidate();
+                        return true;
+                    }
+                });
             loadHighResPortraits(context);
             ColorMatrix matrix = new ColorMatrix();
             matrix.setSaturation(0);
@@ -290,19 +271,27 @@ public final class Persona1Mod extends DuoMod {
             setFocusable(true);
         }
 
-        void setMap(MapState newMap) {
-            map = newMap;
-            invalidate();
-        }
-
         void setUnits(Unit[] newParty, Unit[] newEnemies, boolean inBattle) {
-            if (sameUnits(party, newParty) && sameUnits(enemies, newEnemies) && battle == inBattle) return;
+            long now = SystemClock.uptimeMillis();
+            if (newParty != null) {
+                for (int i = 0; i < Math.min(newParty.length, party.length); i++) {
+                    Unit old = party[i];
+                    Unit next = newParty[i];
+                    if (old != null && next != null && old.id == next.id && next.hp < old.hp) {
+                        hitTimes[i] = now;
+                    }
+                }
+            }
+            if (sameUnits(party, newParty) && sameUnits(enemies, newEnemies) && battle == inBattle) {
+                if (hasActiveHitEffect()) postInvalidateOnAnimation();
+                return;
+            }
             party = newParty;
             enemies = newEnemies;
             battle = inBattle;
             if (selected >= party.length) selected = party.length - 1;
             if (selected < -1) selected = -1;
-            invalidate();
+            postInvalidateOnAnimation();
         }
 
         private static boolean sameUnits(Unit[] a, Unit[] b) {
@@ -317,6 +306,7 @@ public final class Persona1Mod extends DuoMod {
             float w = getWidth(), h = getHeight();
             if (w <= 0 || h <= 0) return;
             float scale = h / 240f;
+            viewScale = scale;
             canvas.save();
             canvas.scale(scale, scale);
             float logicalW = w / scale;
@@ -324,13 +314,26 @@ public final class Persona1Mod extends DuoMod {
             drawBackground(canvas, logicalW, 240);
             if (showFullPortrait && fullPortraitUnit != null) {
                 drawFullPortrait(canvas, logicalW, 240, fullPortraitUnit);
-            } else if (showMap) {
-                drawMapScreen(canvas, logicalW, 240);
             } else {
                 drawCardsViewport(canvas, logicalW);
                 drawInfoPanel(canvas, logicalW);
             }
             canvas.restore();
+            if (hasActiveHitEffect()) postInvalidateOnAnimation();
+        }
+
+        private boolean hasActiveHitEffect() {
+            long now = SystemClock.uptimeMillis();
+            for (long hit : hitTimes) {
+                if (hit > 0 && now - hit < HIT_EFFECT_MS) return true;
+            }
+            return false;
+        }
+
+        private float shakeOffset(long since) {
+            if (since < 0 || since >= HIT_EFFECT_MS) return 0f;
+            float fade = 1f - since / (float) HIT_EFFECT_MS;
+            return (float) Math.sin(since * 0.09) * 5.5f * fade;
         }
 
         private void loadHighResPortraits(Context context) {
@@ -364,84 +367,26 @@ public final class Persona1Mod extends DuoMod {
         }
 
         private void drawFullPortrait(Canvas c, float w, float h, Unit unit) {
-            c.drawColor(0xFF101213);
+            c.drawColor(0xFF100B16);
             Bitmap bitmap = getPortrait(unit);
             if (bitmap != null) {
-                // Show the entire supplied image without cropping or stretching.
                 float availableW = Math.max(1f, w - 12f);
                 float availableH = Math.max(1f, h - 30f);
-                float scale = Math.min(availableW / bitmap.getWidth(), availableH / bitmap.getHeight());
-                float dw = bitmap.getWidth() * scale, dh = bitmap.getHeight() * scale;
-                float left = (w - dw) / 2f;
-                float top = 3f + (availableH - dh) / 2f;
-                rect.set(left, top, left + dw, top + dh);
+                float fit = Math.min(availableW / bitmap.getWidth(), availableH / bitmap.getHeight());
+                float dw = bitmap.getWidth() * fit, dh = bitmap.getHeight() * fit;
+                c.save();
+                c.translate(w / 2f + portraitOffsetX, h / 2f + portraitOffsetY);
+                c.scale(portraitZoom, portraitZoom);
+                rect.set(-dw / 2f, -dh / 2f, dw / 2f, dh / 2f);
                 c.drawBitmap(bitmap, null, rect, paint);
+                c.restore();
             }
-            float bx = w - 49f, by = 5f;
-            fill(c, bx, by, w - 5f, by + 17f, 0xFF353A3B);
-            outline(c, bx, by, w - 5f, by + 17f, GREEN, 0.8f);
-            text(c, "Close", (bx + w - 5f) / 2f, by + 11.5f, 7.5f, WHITE, true, Paint.Align.CENTER);
-            text(c, unit.name, w / 2f, h - 5f, 8f, WHITE, true, Paint.Align.CENTER);
-        }
-
-        private void drawMapScreen(Canvas c, float w, float h) {
-            c.drawColor(0xFF171A1B);
-            text(c, "DUNGEON MAP", 9, 16, 10, 0xFFE0A030, true, Paint.Align.LEFT);
-            if (map != null) {
-                drawDungeonMap(c, map, 8, 22, w - 8, h - 8, 1f);
-            } else {
-                text(c, "Map unavailable outside a dungeon", w / 2f, h / 2f, 8, WHITE, true, Paint.Align.CENTER);
-            }
-            float bx = w - 42, by = 5;
-            fill(c, bx, by, w - 5, by + 17, 0xFF353A3B);
-            outline(c, bx, by, w - 5, by + 17, GREEN, 0.8f);
-            text(c, "Close", (bx + w - 5) / 2f, by + 11.5f, 7.5f, WHITE, true, Paint.Align.CENTER);
-        }
-
-        private void drawDungeonMap(Canvas c, MapState mp, float l, float t, float r, float b, float u) {
-            final int MAP_FLOOR = 0xFF5A4318, MAP_EDGE = 0xFFE0A030, MAP_GRID = 0xFF141414;
-            final int PLAYER = 0xFFFFE680, DOOR = 0xFFFFD84A;
-            final int[] SIDES = {Persona1Art.Dungeon.N, Persona1Art.Dungeon.E, Persona1Art.Dungeon.S, Persona1Art.Dungeon.W};
-            float size = Math.min(r - l, b - t), cell = size / MAP_SIZE;
-            float ox = (l + r - size) / 2f, oy = t + (b - t - size) / 2f;
-            for (int y = 0; y < MAP_SIZE; y++) for (int x = 0; x < MAP_SIZE; x++) {
-                float x0 = ox + x * cell, y0 = oy + y * cell;
-                if (!mp.explored(x, y)) { fill(c, x0 + 1, y0 + 1, x0 + cell - 1, y0 + cell - 1, MAP_GRID); continue; }
-                fill(c, x0, y0, x0 + cell, y0 + cell, MAP_FLOOR);
-                float edge = Math.max(1.2f, 2.1f * u);
-                for (int side = 0; side < 4; side++) {
-                    int bit = SIDES[side];
-                    int nx = x + (bit == Persona1Art.Dungeon.E ? 1 : bit == Persona1Art.Dungeon.W ? -1 : 0);
-                    int ny = y + (bit == Persona1Art.Dungeon.S ? 1 : bit == Persona1Art.Dungeon.N ? -1 : 0);
-                    boolean inside = nx >= 0 && ny >= 0 && nx < MAP_SIZE && ny < MAP_SIZE;
-                    boolean wall, door = false;
-                    if (mp.walls == null || mp.doors == null) wall = !mp.explored(nx, ny);
-                    else {
-                        int k = y * MAP_SIZE + x, nk = ny * MAP_SIZE + nx, opposite = SIDES[(side + 2) % 4];
-                        door = (mp.doors[k] & bit) != 0 || (inside && (mp.doors[nk] & opposite) != 0);
-                        wall = !door && ((mp.walls[k] & bit) != 0 || (inside && (mp.walls[nk] & opposite) != 0));
-                    }
-                    int color = door ? DOOR : MAP_EDGE;
-                    if (wall || door) {
-                        float inset = door ? cell * .22f : 0, thick = door ? edge * 1.8f : edge;
-                        float x1 = x0 + cell, y1 = y0 + cell;
-                        if (bit == Persona1Art.Dungeon.N) fill(c, x0 + inset, y0, x1 - inset, y0 + thick, color);
-                        else if (bit == Persona1Art.Dungeon.S) fill(c, x0 + inset, y1 - thick, x1 - inset, y1, color);
-                        else if (bit == Persona1Art.Dungeon.W) fill(c, x0, y0 + inset, x0 + thick, y1 - inset, color);
-                        else fill(c, x1 - thick, y0 + inset, x1, y1 - inset, color);
-                    }
-                }
-            }
-            float px = ox + (mp.x + .5f) * cell, py = oy + (mp.y + .5f) * cell;
-            c.save(); c.rotate(-mp.angle, px, py);
-            mapPath.reset(); mapPath.moveTo(px, py - cell * .42f); mapPath.lineTo(px + cell * .34f, py + cell * .34f);
-            mapPath.lineTo(px, py + cell * .16f); mapPath.lineTo(px - cell * .34f, py + cell * .34f); mapPath.close();
-            paint.setColor(PLAYER); c.drawPath(mapPath, paint); c.restore();
+            text(c, "PINCH TO ZOOM  /  TAP TO RETURN", w / 2f, h - 7f, 6.2f, WHITE, true, Paint.Align.CENTER);
         }
 
         private void drawBackground(Canvas c, float w, float h) {
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0xFF303435);
+            paint.setColor(0xFF2A2033);
             for (float y = 3; y < h; y += 6) {
                 for (float x = ((int)(y * 2)) % 11; x < w; x += 11) c.drawCircle(x, y, 0.28f, paint);
             }
@@ -453,9 +398,16 @@ public final class Persona1Mod extends DuoMod {
             float total = party.length * CARD_W + Math.max(0, party.length - 1) * GAP;
             float maxScroll = Math.max(0, total - (w - MARGIN * 2));
             scrollX = Math.max(0, Math.min(scrollX, maxScroll));
+            long now = SystemClock.uptimeMillis();
             for (int i = 0; i < party.length; i++) {
                 float x = MARGIN + i * (CARD_W + GAP) - scrollX;
+                long since = hitTimes[i] == 0 ? HIT_EFFECT_MS : now - hitTimes[i];
+                x += shakeOffset(since);
                 drawCard(c, party[i], x, CARD_TOP, CARD_W, CARD_H, i == selected);
+                if (since >= 0 && since < HIT_EFFECT_MS) {
+                    int alpha = (int) (110 * (1f - since / (float) HIT_EFFECT_MS));
+                    fill(c, x, 25, x + CARD_W, 25 + CARD_H, (alpha << 24) | 0x00E5392F);
+                }
             }
             c.restore();
             if (maxScroll > 0) {
@@ -470,17 +422,17 @@ public final class Persona1Mod extends DuoMod {
         private void drawCard(Canvas c, Unit unit, float x, float y, float w, float h, boolean active) {
             boolean down = unit.hp == 0;
             float right = x + w, bottom = y + h;
-            fill(c, x, y, right, bottom, 0xFF111314);
+            fill(c, x, y, right, bottom, 0xFF100B16);
             stroke(c, x + 0.7f, y + 0.7f, right - 0.7f, bottom - 0.7f, 0xFF6E7475, 0.7f);
             float left = x + 1.5f, innerR = right - 1.5f;
-            fill(c, left, y + 1.5f, innerR, y + 17, active ? PANEL_LIGHT : 0xFF4A4D4E);
+            fill(c, left, y + 1.5f, innerR, y + 17, active ? PANEL_LIGHT : 0xFF4B365B);
             text(c, unit.name, x + w / 2, y + 12, fit(unit.name, w - 8, 9), WHITE, true, Paint.Align.CENTER);
 
             drawStat(c, "HP", unit.hp, unit.maxHp, HP_COLOR, left, y + 18, innerR, 19);
             drawStat(c, "SP", unit.sp, unit.maxSp, SP_COLOR, left, y + 37, innerR, 19);
 
             float imageTop = y + 56, imageBottom = bottom - 1.5f;
-            fill(c, left, imageTop, innerR, imageBottom, unit.enemy ? 0xFFE8DCD4 : 0xFFDCE6F0);
+            fill(c, left, imageTop, innerR, imageBottom, down ? 0xFF777777 : (unit.enemy ? 0xFF6B536F : 0xFF382447));
             Bitmap portrait = getPortrait(unit);
             if (portrait != null) {
                 c.save();
@@ -553,7 +505,7 @@ public final class Persona1Mod extends DuoMod {
         }
 
         private void drawStat(Canvas c, String label, int value, int max, int color, float l, float y, float r, float rowH) {
-            fill(c, l, y, r, y + rowH, 0xFF1C2021);
+            fill(c, l, y, r, y + rowH, 0xFF21152B);
             float labelW = 18;
             // SMT IV-style labels: colored letters with a dark outline, not colored boxes.
             outlineText(c, label, l + 3, y + rowH - 5, 7.2f, color, true, Paint.Align.LEFT);
@@ -569,34 +521,87 @@ public final class Persona1Mod extends DuoMod {
 
         private void drawInfoPanel(Canvas c, float w) {
             float top = PANEL_TOP, bottom = PANEL_BOTTOM;
-            fill(c, 5, top, w - 5, bottom, 0xFFD7D6D0);
-            outline(c, 5, top, w - 5, bottom, 0xFFF0EEE7, 0.8f);
-            paint.setColor(0x22FFFFFF);
+            fill(c, 5, top, w - 5, bottom, 0xFF2D173F);
+            outline(c, 5, top, w - 5, bottom, 0xFF9B59D0, 0.9f);
+            outline(c, 7, top + 2, w - 7, bottom - 2, 0xFF6E4A86, 0.45f);
+
+            // Same subtle micro-grid pattern as Persona 2, recolored to match Persona 1.
+            paint.setColor(0x229B59D0);
+            paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(0.35f);
-            for (float y = top + 4; y < bottom; y += 8) c.drawLine(7, y, w - 7, y, paint);
+            for (float gx = 10; gx < w - 8; gx += 5) {
+                c.drawLine(gx, top + 3, gx, bottom - 3, paint);
+            }
+            for (float gy = top + 4; gy < bottom - 3; gy += 5) {
+                c.drawLine(8, gy, w - 8, gy, paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+
             if (selected < 0 || selected >= party.length) {
-                text(c, "PARTY", 10, top + 14, 9, BLACK, true, Paint.Align.LEFT);
-                text(c, "Tap a card to view status", 10, top + 30, 7.5f, 0xFF444747, false, Paint.Align.LEFT);
+                drawButterfly(c, w * 0.69f, top + 31f, 15f, 0x30C77BFF);
+                text(c, "PARTY", 10, top + 14, 9, WHITE, true, Paint.Align.LEFT);
+                text(c, "Tap a card to view status", 10, top + 30, 7.5f, WHITE, false, Paint.Align.LEFT);
                 return;
             }
+
             Unit unit = party[selected];
-            text(c, "PARTY MEMBER  /  " + unit.name.toUpperCase() + "   LV. " + unit.level,
-                10, top + 13, fit("PARTY MEMBER  /  " + unit.name.toUpperCase() + "   LV. " + unit.level, w - 20, 8.2f),
-                BLACK, true, Paint.Align.LEFT);
-            textSpaced(c, "HP  " + unit.hp + " / " + unit.maxHp, 10, top + 28, 7.8f, 0xFF444747, Paint.Align.LEFT);
+            float buttonW = 48f, buttonH = 17f;
+            float fullX = w - buttonW - 11f, by = top + 19f;
+
+            String heading = unit.name.toUpperCase() + "    LV. " + unit.level;
+            text(c, heading, 10, top + 13,
+                fit(heading, fullX - 18f, 8.2f), WHITE, true, Paint.Align.LEFT);
+            textSpaced(c, "HP  " + unit.hp + " / " + unit.maxHp, 10, top + 28, 7.8f, WHITE, Paint.Align.LEFT);
             float barW = Math.min(w - 20, 142);
             drawPanelBar(c, 10, top + 31, barW, 3.2f, unit.hp, unit.maxHp, HP_COLOR);
-            textSpaced(c, "SP  " + unit.sp + " / " + unit.maxSp, 10, top + 44, 7.8f, 0xFF444747, Paint.Align.LEFT);
+            textSpaced(c, "SP  " + unit.sp + " / " + unit.maxSp, 10, top + 44, 7.8f, WHITE, Paint.Align.LEFT);
             drawPanelBar(c, 10, top + 47, barW, 3.2f, unit.sp, unit.maxSp, SP_COLOR);
-            float buttonW = 48f, buttonH = 17f;
-            float fullX = w - buttonW - 32f - 5f - 11f, by = top + 19f;
-            float mapW = 32f, mapX = fullX + buttonW + 5f;
-            fill(c, fullX, by, fullX + buttonW, by + buttonH, 0xFF353A3B);
+
+            drawButterfly(c, w * 0.69f, top + 31f, 15f, 0x30C77BFF);
+
+            fill(c, fullX, by, fullX + buttonW, by + buttonH, 0xFF251333);
             outline(c, fullX, by, fullX + buttonW, by + buttonH, GREEN, 0.8f);
             text(c, "Full portrait", fullX + buttonW / 2f, by + 11.5f, 6.8f, WHITE, true, Paint.Align.CENTER);
-            fill(c, mapX, by, mapX + mapW, by + buttonH, 0xFF353A3B);
-            outline(c, mapX, by, mapX + mapW, by + buttonH, 0xFFE0A030, 0.8f);
-            textSpaced(c, "Map", mapX + mapW / 2f, by + 11.5f, 6.8f, WHITE, Paint.Align.CENTER);
+        }
+
+        private void drawButterfly(Canvas c, float cx, float cy, float size, int color) {
+            int oldColor = paint.getColor();
+            Paint.Style oldStyle = paint.getStyle();
+            float oldStroke = paint.getStrokeWidth();
+            Path wings = new Path();
+            wings.moveTo(cx, cy);
+            wings.cubicTo(cx - size * 0.15f, cy - size * 0.95f, cx - size * 1.15f, cy - size * 1.05f, cx - size * 0.95f, cy - size * 0.12f);
+            wings.cubicTo(cx - size * 0.88f, cy + size * 0.38f, cx - size * 0.28f, cy + size * 0.40f, cx, cy);
+            wings.moveTo(cx, cy);
+            wings.cubicTo(cx + size * 0.15f, cy - size * 0.95f, cx + size * 1.15f, cy - size * 1.05f, cx + size * 0.95f, cy - size * 0.12f);
+            wings.cubicTo(cx + size * 0.88f, cy + size * 0.38f, cx + size * 0.28f, cy + size * 0.40f, cx, cy);
+            wings.moveTo(cx, cy + size * 0.05f);
+            wings.cubicTo(cx - size * 0.65f, cy + size * 0.20f, cx - size * 0.72f, cy + size * 0.85f, cx - size * 0.12f, cy + size * 0.58f);
+            wings.cubicTo(cx - size * 0.05f, cy + size * 0.40f, cx - size * 0.02f, cy + size * 0.20f, cx, cy + size * 0.05f);
+            wings.moveTo(cx, cy + size * 0.05f);
+            wings.cubicTo(cx + size * 0.65f, cy + size * 0.20f, cx + size * 0.72f, cy + size * 0.85f, cx + size * 0.12f, cy + size * 0.58f);
+            wings.cubicTo(cx + size * 0.05f, cy + size * 0.40f, cx + size * 0.02f, cy + size * 0.20f, cx, cy + size * 0.05f);
+            paint.setColor(color);
+            paint.setStyle(Paint.Style.FILL);
+            c.drawPath(wings, paint);
+            paint.setColor(oldColor);
+            paint.setStyle(oldStyle);
+            paint.setStrokeWidth(oldStroke);
+        }
+
+        private void clampPortraitOffsets() {
+            if (fullPortraitUnit == null) return;
+            Bitmap bitmap = getPortrait(fullPortraitUnit);
+            if (bitmap == null) return;
+            float availableW = Math.max(1f, getWidth() / viewScale - 12f);
+            float availableH = 210f;
+            float fit = Math.min(availableW / bitmap.getWidth(), availableH / bitmap.getHeight());
+            float halfW = bitmap.getWidth() * fit * portraitZoom / 2f;
+            float halfH = bitmap.getHeight() * fit * portraitZoom / 2f;
+            float maxX = Math.max(0f, halfW - availableW / 2f);
+            float maxY = Math.max(0f, halfH - availableH / 2f);
+            portraitOffsetX = Math.max(-maxX, Math.min(maxX, portraitOffsetX));
+            portraitOffsetY = Math.max(-maxY, Math.min(maxY, portraitOffsetY));
         }
 
         private void drawPanelBar(Canvas c, float x, float y, float width, float height, int value, int max, int color) {
@@ -709,6 +714,50 @@ public final class Persona1Mod extends DuoMod {
             float x = event.getX() / scale;
             float y = event.getY() / scale;
             float w = getWidth() / scale;
+
+            if (showFullPortrait) {
+                scaleDetector.onTouchEvent(event);
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        portraitPointerId = event.getPointerId(0);
+                        portraitLastX = x; portraitLastY = y;
+                        portraitGestureUsed = false; dragging = true; moved = false;
+                        return true;
+                    case MotionEvent.ACTION_POINTER_DOWN:
+                        portraitGestureUsed = true; moved = true;
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        if (!scaleDetector.isInProgress() && event.getPointerCount() == 1 &&
+                            dragging && portraitZoom > 1f && portraitPointerId != MotionEvent.INVALID_POINTER_ID) {
+                            int pi = event.findPointerIndex(portraitPointerId);
+                            if (pi >= 0) {
+                                float px = event.getX(pi) / scale, py = event.getY(pi) / scale;
+                                float dx = px - portraitLastX, dy = py - portraitLastY;
+                                portraitOffsetX += dx; portraitOffsetY += dy;
+                                clampPortraitOffsets();
+                                if (Math.abs(dx) + Math.abs(dy) > 1f) {
+                                    moved = true; portraitGestureUsed = true;
+                                }
+                                portraitLastX = px; portraitLastY = py;
+                                invalidate();
+                            }
+                        }
+                        return true;
+                    case MotionEvent.ACTION_POINTER_UP:
+                        portraitGestureUsed = true; moved = true;
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        dragging = false;
+                        if (!moved && !portraitGestureUsed) {
+                            showFullPortrait = false; fullPortraitUnit = null;
+                            portraitZoom = 1f; portraitOffsetX = portraitOffsetY = 0f;
+                        }
+                        performClick(); invalidate(); return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        dragging = false; return true;
+                }
+                return true;
+            }
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
                     downX = lastX = x;
@@ -738,11 +787,6 @@ public final class Persona1Mod extends DuoMod {
                         invalidate();
                         return true;
                     }
-                    if (showMap) {
-                        showMap = false;
-                        invalidate();
-                        return true;
-                    }
                     if (y >= CARD_TOP && y <= CARD_TOP + CARD_H && x >= MARGIN && x <= w - MARGIN) {
                         int index = (int)((x + scrollX - MARGIN) / (CARD_W + GAP));
                         float within = (x + scrollX - MARGIN) % (CARD_W + GAP);
@@ -762,13 +806,12 @@ public final class Persona1Mod extends DuoMod {
                         if (selected >= 0) {
                             float buttonW = 48f;
                             float buttonY = PANEL_TOP + 19f;
-                            float fullLeft = w - buttonW - 32f - 5f - 11f;
-                            float mapLeft = fullLeft + buttonW + 5f;
+                            float fullLeft = w - buttonW - 11f;
                             if (y >= buttonY && y <= buttonY + 17f && x >= fullLeft && x <= fullLeft + buttonW) {
                                 fullPortraitUnit = party[selected];
                                 showFullPortrait = true;
-                            } else if (y >= buttonY && y <= buttonY + 17f && x >= mapLeft && x <= mapLeft + 32f) {
-                                showMap = true;
+                                portraitZoom = 1f;
+                                portraitOffsetX = portraitOffsetY = 0f;
                             } else {
                                 detailMode = !detailMode;
                             }
